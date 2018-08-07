@@ -27,8 +27,9 @@ const (
 )
 
 type grpcOverHttpClient struct {
-	serverURL  *url.URL
-	httpClient *http.Client
+	serverURL             *url.URL
+	httpClient            *http.Client
+	controlPlaneNamespace string
 }
 
 // TODO: This will replace Stat, once implemented
@@ -45,6 +46,10 @@ func (c *grpcOverHttpClient) Version(ctx context.Context, req *pb.Empty, _ ...gr
 }
 
 func (c *grpcOverHttpClient) SelfCheck(ctx context.Context, req *healthcheckPb.SelfCheckRequest, _ ...grpc.CallOption) (*healthcheckPb.SelfCheckResponse, error) {
+	if namespaceCheck := c.checkIfNamespaceExists(); namespaceCheck != nil {
+		return namespaceCheck, nil
+	}
+
 	var msg healthcheckPb.SelfCheckResponse
 	err := c.apiRequest(ctx, "SelfCheck", req, &msg)
 	return &msg, err
@@ -134,6 +139,42 @@ func (c *grpcOverHttpClient) endpointNameToPublicApiUrl(endpoint string) *url.UR
 	return c.serverURL.ResolveReference(&url.URL{Path: endpoint})
 }
 
+func (c *grpcOverHttpClient) checkIfNamespaceExists() *healthcheckPb.SelfCheckResponse {
+	var checkStatus healthcheckPb.CheckStatus
+	var checkMessage string
+
+	url := *c.serverURL
+	url.Path = fmt.Sprintf("/api/v1/namespaces/%s", c.controlPlaneNamespace)
+	log.Debugf("Making GET request to [%s]", url.String())
+
+	rsp, err := c.httpClient.Get(url.String())
+	if err != nil {
+		checkStatus = healthcheckPb.CheckStatus_ERROR
+		checkMessage = err.Error()
+	} else if rsp.StatusCode == http.StatusNotFound {
+		checkStatus = healthcheckPb.CheckStatus_FAIL
+		checkMessage = fmt.Sprintf("Linkerd is not installed in the \"%s\" namespace", c.controlPlaneNamespace)
+	} else if rsp.StatusCode != http.StatusOK {
+		checkStatus = healthcheckPb.CheckStatus_ERROR
+		checkMessage = fmt.Sprintf("Unexpected API response [%d]", rsp.StatusCode)
+	}
+
+	if checkMessage != "" {
+		return &healthcheckPb.SelfCheckResponse{
+			Results: []*healthcheckPb.CheckResult{
+				&healthcheckPb.CheckResult{
+					SubsystemName:         ApiSubsystemName,
+					CheckDescription:      "control plane namespace exists",
+					Status:                checkStatus,
+					FriendlyMessageToUser: checkMessage,
+				},
+			},
+		}
+	}
+
+	return nil
+}
+
 type tapClient struct {
 	ctx    context.Context
 	reader *bufio.Reader
@@ -167,8 +208,7 @@ func fromByteStreamToProtocolBuffers(byteStreamContainingMessage *bufio.Reader, 
 	return nil
 }
 
-func newClient(apiURL *url.URL, httpClientToUse *http.Client) (pb.ApiClient, error) {
-
+func newClient(apiURL *url.URL, httpClientToUse *http.Client, controlPlaneNamespace string) (pb.ApiClient, error) {
 	if !apiURL.IsAbs() {
 		return nil, fmt.Errorf("server URL must be absolute, was [%s]", apiURL.String())
 	}
@@ -178,18 +218,19 @@ func newClient(apiURL *url.URL, httpClientToUse *http.Client) (pb.ApiClient, err
 	log.Debugf("Expecting API to be served over [%s]", serverUrl)
 
 	return &grpcOverHttpClient{
-		serverURL:  serverUrl,
-		httpClient: httpClientToUse,
+		serverURL:             serverUrl,
+		httpClient:            httpClientToUse,
+		controlPlaneNamespace: controlPlaneNamespace,
 	}, nil
 }
 
-func NewInternalClient(kubernetesApiHost string) (pb.ApiClient, error) {
+func NewInternalClient(controlPlaneNamespace string, kubernetesApiHost string) (pb.ApiClient, error) {
 	apiURL, err := url.Parse(fmt.Sprintf("http://%s/", kubernetesApiHost))
 	if err != nil {
 		return nil, err
 	}
 
-	return newClient(apiURL, http.DefaultClient)
+	return newClient(apiURL, http.DefaultClient, controlPlaneNamespace)
 }
 
 func NewExternalClient(controlPlaneNamespace string, kubeApi k8s.KubernetesApi) (pb.ApiClient, error) {
@@ -203,5 +244,5 @@ func NewExternalClient(controlPlaneNamespace string, kubeApi k8s.KubernetesApi) 
 		return nil, err
 	}
 
-	return newClient(apiURL, httpClientToUse)
+	return newClient(apiURL, httpClientToUse, controlPlaneNamespace)
 }

@@ -54,7 +54,7 @@ problems were found.`,
 
 			var apiClient pb.ApiClient
 			if apiAddr != "" {
-				apiClient, err = public.NewInternalClient(apiAddr)
+				apiClient, err = public.NewInternalClient(controlPlaneNamespace, apiAddr)
 			} else {
 				apiClient, err = public.NewExternalClient(controlPlaneNamespace, kubeApi)
 			}

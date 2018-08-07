@@ -2,7 +2,6 @@ package healthcheck
 
 import (
 	"context"
-	"fmt"
 	"time"
 
 	healthcheckPb "github.com/linkerd/linkerd2/controller/gen/common/healthcheck"
@@ -19,30 +18,22 @@ type statusCheckerProxy struct {
 }
 
 func (proxy *statusCheckerProxy) SelfCheck() []*healthcheckPb.CheckResult {
-	canConnectViaGrpcCheck := &healthcheckPb.CheckResult{
-		Status:           healthcheckPb.CheckStatus_OK,
-		SubsystemName:    proxy.prefix,
-		CheckDescription: "can query the Linkerd API",
-	}
-
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	selfCheckResponse, err := proxy.delegate.SelfCheck(ctx, &healthcheckPb.SelfCheckRequest{})
 	if err != nil {
-		canConnectViaGrpcCheck.Status = healthcheckPb.CheckStatus_ERROR
-		canConnectViaGrpcCheck.FriendlyMessageToUser = err.Error()
-		return []*healthcheckPb.CheckResult{canConnectViaGrpcCheck}
+		return []*healthcheckPb.CheckResult{
+			&healthcheckPb.CheckResult{
+				SubsystemName:         proxy.prefix,
+				CheckDescription:      "can query the Linkerd API",
+				Status:                healthcheckPb.CheckStatus_ERROR,
+				FriendlyMessageToUser: err.Error(),
+			},
+		}
 	}
 
-	for _, check := range selfCheckResponse.Results {
-		fullSubsystemName := fmt.Sprintf("%s[%s]", proxy.prefix, check.SubsystemName)
-		check.SubsystemName = fullSubsystemName
-	}
-
-	subsystemResults := []*healthcheckPb.CheckResult{canConnectViaGrpcCheck}
-	subsystemResults = append(subsystemResults, selfCheckResponse.Results...)
-	return subsystemResults
+	return selfCheckResponse.Results
 }
 
 func NewGrpcStatusChecker(name string, grpClient grpcStatusChecker) StatusChecker {

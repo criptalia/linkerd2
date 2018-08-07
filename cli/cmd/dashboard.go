@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/linkerd/linkerd2/controller/api/public"
 	healthcheckPb "github.com/linkerd/linkerd2/controller/gen/common/healthcheck"
 	pb "github.com/linkerd/linkerd2/controller/gen/public"
 	"github.com/linkerd/linkerd2/pkg/k8s"
@@ -71,18 +72,15 @@ func newCmdDashboard() *cobra.Command {
 				os.Exit(1)
 			}
 
-			client, err := newPublicAPIClient()
+			client, err := checkClusterAvailability()
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Failed to initialize Linkerd API client: %+v\n", err)
+				fmt.Fprintf(os.Stderr, "Cannot connect to Kubernetes: %s\n", err)
 				os.Exit(1)
 			}
 
-			dashboardAvailable, err := isDashboardAvailable(client)
+			err = checkDashboardAvailability(client)
 			if err != nil {
 				log.Debugf("Error checking dashboard availability: %s", err)
-			}
-
-			if err != nil || !dashboardAvailable {
 				fmt.Fprintf(os.Stderr, "Linkerd is not running in the \"%s\" namespace\n", controlPlaneNamespace)
 				fmt.Fprintf(os.Stderr, "Install with: linkerd install --linkerd-namespace %s | kubectl apply -f -\n", controlPlaneNamespace)
 				os.Exit(1)
@@ -131,16 +129,40 @@ func newCmdDashboard() *cobra.Command {
 	return cmd
 }
 
-func isDashboardAvailable(client pb.ApiClient) (bool, error) {
+func checkClusterAvailability() (client pb.ApiClient, err error) {
+	if apiAddr != "" {
+		client, err = public.NewInternalClient(controlPlaneNamespace, apiAddr)
+	} else {
+		var kubeAPI k8s.KubernetesApi
+		kubeAPI, err = k8s.NewAPI(kubeconfigPath)
+		if err != nil {
+			return
+		}
+
+		for _, result := range kubeAPI.SelfCheck() {
+			if result.Status != healthcheckPb.CheckStatus_OK {
+				err = fmt.Errorf(result.FriendlyMessageToUser)
+				return
+			}
+		}
+
+		client, err = public.NewExternalClient(controlPlaneNamespace, kubeAPI)
+	}
+
+	return
+}
+
+func checkDashboardAvailability(client pb.ApiClient) error {
 	res, err := client.SelfCheck(context.Background(), &healthcheckPb.SelfCheckRequest{})
 	if err != nil {
-		return false, err
+		return err
 	}
 
 	for _, result := range res.Results {
 		if result.Status != healthcheckPb.CheckStatus_OK {
-			return false, nil
+			return fmt.Errorf(result.FriendlyMessageToUser)
 		}
 	}
-	return true, nil
+
+	return nil
 }
